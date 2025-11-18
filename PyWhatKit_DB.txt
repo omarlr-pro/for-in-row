@@ -1,0 +1,10 @@
+Date: 25/7/2024
+Time: 1:56
+Phone Number: +212672540196
+Message: Hello, this is a test message from Python!
+--------------------
+Date: 25/7/2024
+Time: 2:0
+Phone Number: +212672540196
+Message: Hello, this is a test message from Python!
+--------------------
