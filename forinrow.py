@@ -1,392 +1,513 @@
-import pygame
-import sys
-import random
+import time
+import uuid
 
-# Initialize Pygame
-pygame.init()
+import streamlit as st
 
-# Constants
-ROW_COUNT = 6
-COLUMN_COUNT = 7
-SQUARESIZE = 100
-RADIUS = int(SQUARESIZE / 2 - 5)
-width = COLUMN_COUNT * SQUARESIZE
-height = (ROW_COUNT + 1) * SQUARESIZE
-size = (width, height)
-BLUE = (0, 0, 255)
-BLACK = (0, 0, 0)
-RED = (255, 0, 0)
-YELLOW = (255, 255, 0)
-WHITE = (255, 255, 255)
-GREEN = (0, 255, 0)
-FONT = pygame.font.SysFont("monospace", 75)
-SMALL_FONT = pygame.font.SysFont("monospace", 20)
+from connect4.ai import pick_ai_move
+from connect4.logic import (
+    COLUMN_COUNT,
+    PLAYER_1,
+    PLAYER_2,
+    board_is_full,
+    create_board,
+    drop_piece,
+    find_winning_columns,
+    get_next_open_row,
+    is_valid_location,
+    winning_move,
+)
+from connect4.persistence import load_profile_state, save_profile_state
+from connect4.ui import render_board, render_sound_player
 
-# Game mode: "PVP" for Player vs Player, "PVE" for Player vs AI
-GAME_MODE = "PVE"  # Change to "PVP" for two players
-SHOW_PROBABILITIES = True  # Set to True to show win probabilities
 
-# Initialize mixer for music and sound
-pygame.mixer.init()
+MODE_LOCAL = "Friend (Local 2 Players)"
+MODE_BOT = "Vs Bot"
 
-# Load audio files from the assets folder (with error handling)
-try:
-    pygame.mixer.music.load('assets/background.mp3')
-    win_sound = pygame.mixer.Sound('assets/win_sound.mp3')
-    audio_enabled = True
-except:
-    audio_enabled = False
-    print("Audio files not found. Continuing without sound.")
 
-# Create the game board
-def create_board():
-    board = [[0 for _ in range(COLUMN_COUNT)] for _ in range(ROW_COUNT)]
-    return board
+def get_or_create_profile_id():
+    pid = st.query_params.get("pid")
+    if isinstance(pid, list):
+        pid = pid[0]
 
-# Draw the board
-def draw_board(board, probabilities=None):
-    # Clear the entire screen first
-    screen.fill(BLACK)
-    
-    # Draw the blue board with holes
-    for c in range(COLUMN_COUNT):
-        for r in range(ROW_COUNT):
-            pygame.draw.rect(screen, BLUE, (c*SQUARESIZE, r*SQUARESIZE+SQUARESIZE, SQUARESIZE, SQUARESIZE))
-            pygame.draw.circle(screen, BLACK, (int(c*SQUARESIZE+SQUARESIZE/2), int(r*SQUARESIZE+SQUARESIZE+SQUARESIZE/2)), RADIUS)
-    
-    # Draw the pieces
-    for c in range(COLUMN_COUNT):
-        for r in range(ROW_COUNT):
-            if board[r][c] == 1:
-                pygame.draw.circle(screen, RED, (int(c*SQUARESIZE+SQUARESIZE/2), height - int(r*SQUARESIZE+SQUARESIZE/2)), RADIUS)
-            elif board[r][c] == 2:
-                pygame.draw.circle(screen, YELLOW, (int(c*SQUARESIZE+SQUARESIZE/2), height - int(r*SQUARESIZE+SQUARESIZE/2)), RADIUS)
-    
-    # Draw probabilities if enabled - in the top BLACK area, clearly visible
-    if SHOW_PROBABILITIES and probabilities:
-        for col, prob in enumerate(probabilities):
-            if prob is not None:
-                # Draw a semi-transparent background rectangle for better visibility
-                rect_x = col * SQUARESIZE + 10
-                rect_y = 20
-                rect_width = SQUARESIZE - 20
-                rect_height = 40
-                
-                # Draw background rectangle
-                s = pygame.Surface((rect_width, rect_height))
-                s.set_alpha(180)
-                s.fill((50, 50, 50))
-                screen.blit(s, (rect_x, rect_y))
-                
-                # Draw probability percentage with color coding
-                if prob >= 70:
-                    color = GREEN
-                elif prob >= 40:
-                    color = YELLOW
-                else:
-                    color = RED
-                
-                prob_text = SMALL_FONT.render(f"{int(prob)}%", 1, color)
-                text_rect = prob_text.get_rect(center=(col*SQUARESIZE + SQUARESIZE//2, 40))
-                screen.blit(prob_text, text_rect)
-    
-    pygame.display.update()
+    if not pid:
+        pid = uuid.uuid4().hex[:12]
+        st.query_params["pid"] = pid
 
-def drop_piece(board, row, col, piece):
-    board[row][col] = piece
+    return pid
 
-def is_valid_location(board, col):
-    return board[ROW_COUNT-1][col] == 0
 
-def get_next_open_row(board, col):
-    for r in range(ROW_COUNT):
-        if board[r][col] == 0:
-            return r
+def load_profile_once(profile_id):
+    if st.session_state.get("_loaded_profile") == profile_id:
+        return
 
-def winning_move(board, piece):
-    # Check horizontal locations
-    for c in range(COLUMN_COUNT-3):
-        for r in range(ROW_COUNT):
-            if board[r][c] == piece and board[r][c+1] == piece and board[r][c+2] == piece and board[r][c+3] == piece:
-                return True
+    saved = load_profile_state(profile_id)
+    for key, value in saved.items():
+        st.session_state[key] = value
 
-    # Check vertical locations
-    for c in range(COLUMN_COUNT):
-        for r in range(ROW_COUNT-3):
-            if board[r][c] == piece and board[r+1][c] == piece and board[r+2][c] == piece and board[r+3][c] == piece:
-                return True
+    st.session_state._loaded_profile = profile_id
 
-    # Check positively sloped diagonals
-    for c in range(COLUMN_COUNT-3):
-        for r in range(ROW_COUNT-3):
-            if board[r][c] == piece and board[r+1][c+1] == piece and board[r+2][c+2] == piece and board[r+3][c+3] == piece:
-                return True
 
-    # Check negatively sloped diagonals
-    for c in range(COLUMN_COUNT-3):
-        for r in range(3, ROW_COUNT):
-            if board[r][c] == piece and board[r-1][c+1] == piece and board[r-2][c+2] == piece and board[r-3][c+3] == piece:
-                return True
+def persist_profile(profile_id):
+    save_profile_state(profile_id, st.session_state)
 
-def count_windows(board, piece):
-    """Count favorable windows (sequences of 4 positions) for a piece"""
-    score = 0
-    opponent_piece = 1 if piece == 2 else 2
-    
-    # Score center column - VERY important strategically
-    center_array = [board[r][COLUMN_COUNT//2] for r in range(ROW_COUNT)]
-    center_count = center_array.count(piece)
-    score += center_count * 6  # Doubled importance
 
-    # Score horizontal
-    for r in range(ROW_COUNT):
-        for c in range(COLUMN_COUNT-3):
-            window = [board[r][c+i] for i in range(4)]
-            score += evaluate_window(window, piece)
+def setup_sound_defaults():
+    st.session_state.setdefault("sound_enabled", True)
+    st.session_state.setdefault("sound_drop", True)
+    st.session_state.setdefault("sound_win", True)
+    st.session_state.setdefault("sound_draw", True)
+    st.session_state.setdefault("mute", False)
+    st.session_state.setdefault("sound_event", "none")
+    st.session_state.setdefault("sound_nonce", 0)
 
-    # Score vertical
-    for c in range(COLUMN_COUNT):
-        for r in range(ROW_COUNT-3):
-            window = [board[r+i][c] for i in range(4)]
-            score += evaluate_window(window, piece)
 
-    # Score positive diagonal
-    for r in range(ROW_COUNT-3):
-        for c in range(COLUMN_COUNT-3):
-            window = [board[r+i][c+i] for i in range(4)]
-            score += evaluate_window(window, piece)
+def set_sound_event(event_name):
+    if not st.session_state.get("sound_enabled", True):
+        return
 
-    # Score negative diagonal
-    for r in range(3, ROW_COUNT):
-        for c in range(COLUMN_COUNT-3):
-            window = [board[r-i][c+i] for i in range(4)]
-            score += evaluate_window(window, piece)
+    if event_name == "drop" and not st.session_state.get("sound_drop", True):
+        return
+    if event_name == "win" and not st.session_state.get("sound_win", True):
+        return
+    if event_name == "draw" and not st.session_state.get("sound_draw", True):
+        return
 
-    return score
+    st.session_state.sound_event = event_name
+    st.session_state.sound_nonce = st.session_state.get("sound_nonce", 0) + 1
 
-def evaluate_window(window, piece):
-    """Evaluate a window of 4 positions"""
-    score = 0
-    opponent_piece = 1 if piece == 2 else 2
 
-    if window.count(piece) == 4:
-        score += 1000  # Massively increased
-    elif window.count(piece) == 3 and window.count(0) == 1:
-        score += 50  # Much stronger offensive
-    elif window.count(piece) == 2 and window.count(0) == 2:
-        score += 10
+def reset_game(mode, level):
+    st.session_state.board = create_board()
+    st.session_state.turn = PLAYER_1
+    st.session_state.winner = 0
+    st.session_state.history = []
+    st.session_state.move_log = []
+    st.session_state.result_recorded = False
+    st.session_state.mode = mode
+    st.session_state.level = level
 
-    if window.count(opponent_piece) == 3 and window.count(0) == 1:
-        score -= 80  # Much stronger defensive penalty
-    elif window.count(opponent_piece) == 2 and window.count(0) == 2:
-        score -= 5
 
-    return score
+def reset_match(mode, level, best_of):
+    reset_game(mode, level)
+    st.session_state.best_of = best_of
+    st.session_state.score_p1 = 0
+    st.session_state.score_p2 = 0
+    st.session_state.score_draws = 0
 
-def calculate_move_probabilities(board, piece):
-    """Calculate win probability for each possible move with deep analysis"""
-    probabilities = []
-    opponent_piece = 1 if piece == 2 else 2
-    
-    for col in range(COLUMN_COUNT):
-        if is_valid_location(board, col):
-            # Simulate the move
-            temp_board = [row[:] for row in board]
-            row = get_next_open_row(temp_board, col)
-            drop_piece(temp_board, row, col, piece)
-            
-            # Check for immediate win - HIGHEST PRIORITY
-            if winning_move(temp_board, piece):
-                probabilities.append(100.0)
-                continue
-            
-            # Check if opponent can win on their next turn (MUST BLOCK)
-            opponent_can_win = False
-            opponent_winning_col = -1
-            for c in range(COLUMN_COUNT):
-                if is_valid_location(board, c):
-                    test_board = [row[:] for row in board]
-                    r = get_next_open_row(test_board, c)
-                    drop_piece(test_board, r, c, opponent_piece)
-                    if winning_move(test_board, opponent_piece):
-                        opponent_can_win = True
-                        opponent_winning_col = c
-                        break
-            
-            # If opponent can win and this move doesn't block, very bad move
-            if opponent_can_win:
-                if col == opponent_winning_col:
-                    probabilities.append(95.0)  # MUST block
-                    continue
-                else:
-                    probabilities.append(5.0)  # Don't play elsewhere
-                    continue
-            
-            # Look ahead: after AI's move, can opponent create a winning threat?
-            opponent_threats = 0
-            for c in range(COLUMN_COUNT):
-                if is_valid_location(temp_board, c):
-                    test_board = [row[:] for row in temp_board]
-                    r = get_next_open_row(test_board, c)
-                    drop_piece(test_board, r, c, opponent_piece)
-                    
-                    # Count how many ways opponent could win after that
-                    opponent_wins = 0
-                    for c2 in range(COLUMN_COUNT):
-                        if is_valid_location(test_board, c2):
-                            test_board2 = [row[:] for row in test_board]
-                            r2 = get_next_open_row(test_board2, c2)
-                            drop_piece(test_board2, r2, c2, opponent_piece)
-                            if winning_move(test_board2, opponent_piece):
-                                opponent_wins += 1
-                    
-                    if opponent_wins > 1:  # Double threat - very dangerous
-                        opponent_threats += 10
-                    elif opponent_wins == 1:
-                        opponent_threats += 3
-            
-            # Calculate strategic score
-            score = count_windows(temp_board, piece)
-            opponent_score = count_windows(temp_board, opponent_piece)
-            
-            # Penalize moves that give opponent threats
-            score -= opponent_threats * 20
-            
-            # Convert to probability (0-100)
-            if score <= 0:
-                probability = 10.0
-            else:
-                total = score + opponent_score + 10
-                probability = (score / total) * 100
-            
-            # Bonus for creating multiple winning threats
-            ai_threats = 0
-            for c in range(COLUMN_COUNT):
-                if is_valid_location(temp_board, c):
-                    test_board = [row[:] for row in temp_board]
-                    r = get_next_open_row(test_board, c)
-                    drop_piece(test_board, r, c, piece)
-                    if winning_move(test_board, piece):
-                        ai_threats += 1
-            
-            if ai_threats >= 2:  # We create double threat - very good!
-                probability = min(98.0, probability + 40)
-            elif ai_threats == 1:
-                probability = min(90.0, probability + 20)
-            
-            probabilities.append(max(10.0, min(99.0, probability)))
-        else:
-            probabilities.append(None)
-    
-    return probabilities
 
-def ai_move(board):
-    """AI makes a move based on deep strategic analysis"""
-    probabilities = calculate_move_probabilities(board, 2)
-    
-    # Find valid columns
-    valid_columns = [col for col in range(COLUMN_COUNT) if probabilities[col] is not None]
-    
-    if not valid_columns:
-        return None
-    
-    # Get the best probability
-    best_prob = max(probabilities[col] for col in valid_columns)
-    
-    # ALWAYS take winning moves (100%) or critical blocks (95%)
-    if best_prob >= 95:
-        best_cols = [col for col in valid_columns if probabilities[col] >= 95]
-        return best_cols[0]  # Take the first one (deterministic for must-win/must-block)
-    
-    # For strategic moves, pick the absolute best 95% of the time
-    sorted_cols = sorted(valid_columns, key=lambda col: probabilities[col], reverse=True)
-    
-    if random.random() < 0.95:
-        return sorted_cols[0]  # Best move
+def ensure_state(mode, level):
+    if "board" not in st.session_state:
+        reset_match(mode, level, best_of=3)
+        return
+
+    st.session_state.setdefault("best_of", 3)
+    st.session_state.setdefault("history", [])
+    st.session_state.setdefault("move_log", [])
+    st.session_state.setdefault("result_recorded", False)
+    st.session_state.setdefault("bot_name", "Bot")
+
+    if st.session_state.mode != mode or st.session_state.level != level:
+        reset_match(mode, level, st.session_state.best_of)
+
+
+def ensure_match_state(best_of):
+    st.session_state.setdefault("best_of", best_of)
+    st.session_state.setdefault("score_p1", 0)
+    st.session_state.setdefault("score_p2", 0)
+    st.session_state.setdefault("score_draws", 0)
+
+    if st.session_state.best_of != best_of:
+        st.session_state.best_of = best_of
+        st.session_state.score_p1 = 0
+        st.session_state.score_p2 = 0
+        st.session_state.score_draws = 0
+        reset_game(st.session_state.mode, st.session_state.level)
+
+
+def push_history_snapshot():
+    st.session_state.history.append(
+        {
+            "board": [row[:] for row in st.session_state.board],
+            "turn": st.session_state.turn,
+            "winner": st.session_state.winner,
+            "result_recorded": st.session_state.result_recorded,
+        }
+    )
+
+
+def animate_drop(col, row, piece, board_placeholder):
+    for anim_row in range(5, row - 1, -1):
+        render_board(st.session_state.board, falling=(col, anim_row, piece), target=board_placeholder)
+        time.sleep(0.03)
+
+
+def wins_required():
+    return st.session_state.best_of // 2 + 1
+
+
+def is_match_over():
+    return st.session_state.score_p1 >= wins_required() or st.session_state.score_p2 >= wins_required()
+
+
+def player_name(piece):
+    if piece == PLAYER_1:
+        return st.session_state.player1_name
+    if st.session_state.mode == MODE_LOCAL:
+        return st.session_state.player2_name
+    return st.session_state.bot_name
+
+
+def apply_move(col, board_placeholder=None, with_animation=True):
+    if st.session_state.winner != 0 or is_match_over():
+        return False
+
+    board = st.session_state.board
+    turn = st.session_state.turn
+
+    if not is_valid_location(board, col):
+        st.warning("This column is full.")
+        return False
+
+    row = get_next_open_row(board, col)
+    if row is None:
+        st.warning("This column is full.")
+        return False
+
+    push_history_snapshot()
+
+    if with_animation and board_placeholder is not None:
+        animate_drop(col, row, turn, board_placeholder)
+
+    drop_piece(board, row, col, turn)
+
+    st.session_state.move_log.append(
+        {
+            "move": len(st.session_state.move_log) + 1,
+            "player": player_name(turn),
+            "piece": "🔴" if turn == PLAYER_1 else "🟡",
+            "column": col + 1,
+            "row": row + 1,
+        }
+    )
+
+    set_sound_event("drop")
+
+    if winning_move(board, turn):
+        st.session_state.winner = turn
+        set_sound_event("win")
+        return True
+
+    if board_is_full(board):
+        st.session_state.winner = -1
+        set_sound_event("draw")
+        return True
+
+    st.session_state.turn = PLAYER_2 if turn == PLAYER_1 else PLAYER_1
+    return True
+
+
+def undo_last_move_local():
+    if st.session_state.mode != MODE_LOCAL:
+        st.info("Undo is only available in local friend mode.")
+        return
+
+    if not st.session_state.history or st.session_state.winner != 0:
+        st.info("No move to undo right now.")
+        return
+
+    snapshot = st.session_state.history.pop()
+    st.session_state.board = [row[:] for row in snapshot["board"]]
+    st.session_state.turn = snapshot["turn"]
+    st.session_state.winner = snapshot["winner"]
+    st.session_state.result_recorded = snapshot["result_recorded"]
+
+    if st.session_state.move_log:
+        st.session_state.move_log.pop()
+
+
+def undo_last_cycle_vs_bot():
+    if st.session_state.mode != MODE_BOT:
+        st.info("This undo is only for Vs Bot mode.")
+        return
+
+    if st.session_state.winner != 0:
+        st.info("Undo after round finish is disabled. Start a new round.")
+        return
+
+    if len(st.session_state.history) < 2:
+        st.info("No bot cycle to undo yet.")
+        return
+
+    snapshot = None
+    for _ in range(2):
+        snapshot = st.session_state.history.pop()
+
+    if snapshot is None:
+        return
+
+    st.session_state.board = [row[:] for row in snapshot["board"]]
+    st.session_state.turn = snapshot["turn"]
+    st.session_state.winner = snapshot["winner"]
+    st.session_state.result_recorded = snapshot["result_recorded"]
+
+    if st.session_state.move_log:
+        st.session_state.move_log.pop()
+    if st.session_state.move_log:
+        st.session_state.move_log.pop()
+
+
+def record_round_result():
+    if st.session_state.winner == 0 or st.session_state.result_recorded:
+        return
+
+    if st.session_state.winner == PLAYER_1:
+        st.session_state.score_p1 += 1
+    elif st.session_state.winner == PLAYER_2:
+        st.session_state.score_p2 += 1
     else:
-        # Occasionally pick 2nd best for unpredictability
-        return sorted_cols[min(1, len(sorted_cols)-1)]
+        st.session_state.score_draws += 1
 
-# Game variables
-board = create_board()
-game_over = False
-turn = 0
+    st.session_state.result_recorded = True
 
-# Create the screen
-screen = pygame.display.set_mode(size)
-pygame.display.set_caption(f"Connect Four - {'Player vs AI' if GAME_MODE == 'PVE' else 'Player vs Player'}")
-draw_board(board)
 
-def display_winner(player):
-    label = FONT.render(f"Player {player} wins!", 1, RED if player == 1 else YELLOW)
-    screen.blit(label, (40, 10))
-    pygame.display.update()
-    pygame.time.wait(3000)
+def maybe_play_ai(board_placeholder):
+    if st.session_state.mode != MODE_BOT:
+        return
 
-# Main game loop
-clock = pygame.time.Clock()
+    if st.session_state.winner != 0 or is_match_over() or st.session_state.turn != PLAYER_2:
+        return
 
-while not game_over:
-    # Calculate probabilities for current player at the start of each frame
-    if not game_over:
-        current_player = 1 if turn == 0 else 2
-        probabilities = calculate_move_probabilities(board, current_player)
-        draw_board(board, probabilities)
-    
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            pygame.quit()
-            sys.exit()
-        
-        # Human player's turn (Player 1 or both players in PVP mode)
-        if event.type == pygame.MOUSEBUTTONDOWN and (turn == 0 or GAME_MODE == "PVP"):
-            posx = event.pos[0]
-            col = int(posx // SQUARESIZE)
+    col = pick_ai_move(st.session_state.board, st.session_state.level)
+    if col is None:
+        st.session_state.winner = -1
+        set_sound_event("draw")
+        return
 
-            if is_valid_location(board, col):
-                # Start playing background music on the first click
-                if audio_enabled and not pygame.mixer.music.get_busy():
-                    pygame.mixer.music.play(-1)
+    apply_move(col, board_placeholder=board_placeholder, with_animation=True)
 
-                row = get_next_open_row(board, col)
-                current_player = 1 if turn == 0 else 2
-                drop_piece(board, row, col, current_player)
-                
-                if winning_move(board, current_player):
-                    draw_board(board)
-                    if audio_enabled:
-                        pygame.mixer.music.stop()
-                        win_sound.play()
-                    display_winner(current_player)
-                    game_over = True
 
-                turn += 1
-                turn = turn % 2
+def winner_text():
+    if st.session_state.winner == PLAYER_1:
+        return f"{st.session_state.player1_name} (🔴) wins!"
+    if st.session_state.winner == PLAYER_2:
+        return f"{player_name(PLAYER_2)} (🟡) wins!"
+    if st.session_state.winner == -1:
+        return "Draw game."
+    return ""
 
-                if game_over:
-                    pygame.time.wait(3000)
-    
-    # AI's turn (only in PVE mode when it's Player 2's turn)
-    if GAME_MODE == "PVE" and turn == 1 and not game_over:
-        pygame.time.wait(500)  # Short delay for better UX
-        
-        col = ai_move(board)
-        if col is not None and is_valid_location(board, col):
-            row = get_next_open_row(board, col)
-            drop_piece(board, row, col, 2)
-            
-            if winning_move(board, 2):
-                draw_board(board)
-                if audio_enabled:
-                    pygame.mixer.music.stop()
-                    win_sound.play()
-                display_winner(2)
-                game_over = True
-            
-            turn += 1
-            turn = turn % 2
-            
-            if game_over:
-                pygame.time.wait(3000)
-    
-    clock.tick(30)  # 30 FPS
+
+def current_turn_text():
+    if st.session_state.turn == PLAYER_1:
+        return f"{st.session_state.player1_name} (🔴)"
+    return f"{player_name(PLAYER_2)} (🟡)"
+
+
+def parse_keyboard_column(raw_value):
+    if not raw_value:
+        return None
+    value = raw_value.strip()
+    if not value.isdigit():
+        return None
+    col = int(value)
+    if 1 <= col <= COLUMN_COUNT:
+        return col - 1
+    return None
+
+
+def render_threat_hints():
+    if st.session_state.winner != 0 or is_match_over():
+        return
+
+    board = st.session_state.board
+    current_piece = st.session_state.turn
+    opponent_piece = PLAYER_2 if current_piece == PLAYER_1 else PLAYER_1
+
+    winning_now = [col + 1 for col in find_winning_columns(board, current_piece)]
+    must_block = [col + 1 for col in find_winning_columns(board, opponent_piece)]
+
+    if winning_now:
+        st.success(f"Winning move available now: columns {winning_now}")
+    if must_block:
+        st.warning(f"Danger! Opponent can win next turn in columns {must_block}")
+
+
+def render_move_log():
+    logs = st.session_state.get("move_log", [])
+    with st.expander("Move Log", expanded=False):
+        if not logs:
+            st.write("No moves yet.")
+            return
+
+        for entry in logs[-12:]:
+            st.write(
+                f"{entry['move']}. {entry['player']} {entry['piece']} → column {entry['column']} (row {entry['row']})"
+            )
+
+
+def main():
+    st.set_page_config(page_title="Connect Four", page_icon="🎮", layout="centered")
+
+    profile_id = get_or_create_profile_id()
+    load_profile_once(profile_id)
+    setup_sound_defaults()
+
+    st.title("🎮 Connect Four")
+    st.caption(f"Profile ID: {profile_id} (saved automatically)")
+
+    mode_default = st.session_state.get("mode", MODE_LOCAL)
+    mode_options = [MODE_LOCAL, MODE_BOT]
+    mode_index = mode_options.index(mode_default) if mode_default in mode_options else 0
+
+    level_options = ["Easy", "Medium", "Hard", "Hard+"]
+    level_default = st.session_state.get("level", "Medium")
+    level_index = level_options.index(level_default) if level_default in level_options else 1
+
+    best_default = st.session_state.get("best_of", 3)
+    best_options = [3, 5]
+    best_index = best_options.index(best_default) if best_default in best_options else 0
+
+    with st.sidebar:
+        st.subheader("Game Settings")
+        mode = st.radio("Mode", options=mode_options, index=mode_index)
+
+        player1_name = st.text_input("Player 1 Name", value=st.session_state.get("player1_name", "Player 1")).strip()
+        if not player1_name:
+            player1_name = "Player 1"
+
+        player2_name = "Player 2"
+        if mode == MODE_LOCAL:
+            player2_name = st.text_input("Player 2 Name", value=st.session_state.get("player2_name", "Player 2")).strip()
+            if not player2_name:
+                player2_name = "Player 2"
+
+        best_of = st.selectbox("Match Type", options=best_options, index=best_index, format_func=lambda value: f"Best of {value}")
+
+        level = "Medium"
+        if mode == MODE_BOT:
+            level = st.selectbox("Bot Difficulty", options=level_options, index=level_index)
+
+        st.subheader("Sound")
+        sound_enabled = st.checkbox("Sound Enabled", value=st.session_state.get("sound_enabled", True))
+        sound_drop = st.checkbox("Drop Sound", value=st.session_state.get("sound_drop", True))
+        sound_win = st.checkbox("Win Sound", value=st.session_state.get("sound_win", True))
+        sound_draw = st.checkbox("Draw Sound", value=st.session_state.get("sound_draw", True))
+        mute = st.checkbox("Mute", value=st.session_state.get("mute", False))
+
+        st.session_state.player1_name = player1_name
+        st.session_state.player2_name = player2_name
+        st.session_state.bot_name = "Bot"
+        st.session_state.sound_enabled = sound_enabled
+        st.session_state.sound_drop = sound_drop
+        st.session_state.sound_win = sound_win
+        st.session_state.sound_draw = sound_draw
+        st.session_state.mute = mute
+
+        if st.button("New Round", use_container_width=True):
+            reset_game(mode, level)
+            persist_profile(profile_id)
+            st.rerun()
+
+        if st.button("Reset Match", use_container_width=True):
+            reset_match(mode, level, best_of)
+            persist_profile(profile_id)
+            st.rerun()
+
+    ensure_state(mode, level)
+    ensure_match_state(best_of)
+
+    board_placeholder = st.empty()
+
+    maybe_play_ai(board_placeholder)
+    record_round_result()
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Mode", "Local PvP" if mode == MODE_LOCAL else "Vs Bot")
+    c2.metric("Level", "-" if mode == MODE_LOCAL else st.session_state.level)
+    c3.metric("Turn", current_turn_text())
+
+    p1_name = st.session_state.player1_name
+    p2_name = st.session_state.player2_name if mode == MODE_LOCAL else st.session_state.bot_name
+    wins_goal = wins_required()
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric(f"{p1_name} (🔴)", st.session_state.score_p1)
+    s2.metric(f"{p2_name} (🟡)", st.session_state.score_p2)
+    s3.metric("Draws", st.session_state.score_draws)
+    st.caption(f"Match: Best of {st.session_state.best_of} • First to {wins_goal} wins")
+
+    render_board(st.session_state.board, target=board_placeholder)
+
+    if is_match_over():
+        champion = p1_name if st.session_state.score_p1 >= wins_goal else p2_name
+        st.success(f"🏆 {champion} wins the match!")
+
+    if st.session_state.winner != 0:
+        if st.session_state.winner == -1:
+            st.info(winner_text())
+        else:
+            st.success(winner_text())
+    elif not is_match_over():
+        st.write(f"Current turn: **{current_turn_text()}**")
+
+    render_threat_hints()
+
+    st.markdown("### Make your move")
+    human_turn = st.session_state.turn == PLAYER_1 or mode == MODE_LOCAL
+    controls_disabled = st.session_state.winner != 0 or not human_turn or is_match_over()
+
+    with st.form("move_form", clear_on_submit=False):
+        selected_col = st.select_slider("Choose column", options=list(range(1, COLUMN_COUNT + 1)), value=4)
+        move_clicked = st.form_submit_button("Drop Piece", disabled=controls_disabled, use_container_width=True)
+
+    if move_clicked:
+        moved = apply_move(selected_col - 1, board_placeholder=board_placeholder, with_animation=True)
+        if mode == MODE_BOT and st.session_state.winner == 0:
+            maybe_play_ai(board_placeholder)
+        record_round_result()
+        if moved:
+            persist_profile(profile_id)
+            st.rerun()
+
+    with st.form("keyboard_move_form", clear_on_submit=True):
+        keyboard_input = st.text_input("Keyboard move (press 1..7 then Enter)", max_chars=1)
+        key_move_clicked = st.form_submit_button("Play Keyboard Move", disabled=controls_disabled, use_container_width=True)
+
+    if key_move_clicked:
+        key_col = parse_keyboard_column(keyboard_input)
+        if key_col is None:
+            st.warning("Use a number from 1 to 7.")
+        else:
+            moved = apply_move(key_col, board_placeholder=board_placeholder, with_animation=True)
+            if mode == MODE_BOT and st.session_state.winner == 0:
+                maybe_play_ai(board_placeholder)
+            record_round_result()
+            if moved:
+                persist_profile(profile_id)
+                st.rerun()
+
+    c_undo1, c_undo2 = st.columns(2)
+    with c_undo1:
+        if st.button("Undo Last Move (Local)", disabled=mode != MODE_LOCAL or not st.session_state.history or st.session_state.winner != 0):
+            undo_last_move_local()
+            persist_profile(profile_id)
+            st.rerun()
+
+    with c_undo2:
+        if st.button("Undo Last Cycle (You + Bot)", disabled=mode != MODE_BOT or len(st.session_state.history) < 2 or st.session_state.winner != 0):
+            undo_last_cycle_vs_bot()
+            persist_profile(profile_id)
+            st.rerun()
+
+    render_move_log()
+
+    render_sound_player(
+        event_name=st.session_state.get("sound_event", "none"),
+        nonce=st.session_state.get("sound_nonce", 0),
+        muted=st.session_state.get("mute", False) or not st.session_state.get("sound_enabled", True),
+    )
+
+    persist_profile(profile_id)
+
+
+if __name__ == "__main__":
+    main()

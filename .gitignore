@@ -1,0 +1,5 @@
+player_state.json
+__pycache__/
+*.pyc
+.venv/
+myenv/
